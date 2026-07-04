@@ -116,7 +116,6 @@ You can also set the model and permission mode:
 ```toml
 dir = "my-project"
 provider = "codex"
-option_defaults = { model = "o4-mini", permission_mode = "suggest" }
 ```
 
 That file would live at `agents/reviewer/agent.toml`. Valid values come from
