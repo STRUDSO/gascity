@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -83,6 +84,22 @@ func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	// without bound. Callers that need a closed record must fetch that
 	// one ID explicitly.
 	sessions, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
+	if err != nil {
+		return nil, err
+	}
+	return newSessionBeadSnapshot(sessions), nil
+}
+
+// loadSessionBeadSnapshotContext is loadSessionBeadSnapshot but accepts a
+// context so a caller with a deadline (gc status) can cancel the backing
+// queries — via beads.ContextLister when store supports it — instead of
+// leaking a goroutine on timeout. Used only by loadStatusSessionSnapshot;
+// other callers should keep using loadSessionBeadSnapshot.
+func loadSessionBeadSnapshotContext(ctx context.Context, store beads.Store) (*sessionBeadSnapshot, error) {
+	if store == nil {
+		return newSessionBeadSnapshot(nil), nil
+	}
+	sessions, err := sessionpkg.ListAllSessionBeadsContext(ctx, store, beads.ListQuery{})
 	if err != nil {
 		return nil, err
 	}

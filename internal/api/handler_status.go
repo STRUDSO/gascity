@@ -124,7 +124,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	sessionSnapshot := s.statusSessionSnapshot()
+	sessionSnapshot := s.statusSessionSnapshot(ctx)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
@@ -285,7 +285,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
 	if !lite {
-		storeHealth = s.cachedStoreHealth(time.Now())
+		storeHealth = s.cachedStoreHealth(ctx, time.Now())
 	}
 
 	return StatusBody{
@@ -436,7 +436,7 @@ type statusSessionInfo struct {
 	state       session.State
 }
 
-func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
+func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
@@ -446,6 +446,9 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		return snapshot
 	}
 
+	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+
 	type snapshotResult struct {
 		rows          []beads.Bead
 		partialErrors []string
@@ -453,7 +456,7 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		rows, partialErrors, err := sessionReadModelRows(store)
+		rows, partialErrors, err := sessionReadModelRowsContext(reqCtx, store)
 		done <- snapshotResult{rows: rows, partialErrors: partialErrors, err: err}
 	}()
 
@@ -465,7 +468,7 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		rows = result.rows
 		partialErrors = result.partialErrors
 		err = result.err
-	case <-time.After(statusStoreReadTimeout):
+	case <-reqCtx.Done():
 		snapshot.partialErrors = []string{fmt.Sprintf("sessions: loading session snapshot timed out after %s", statusStoreReadTimeout)}
 		return snapshot
 	}
@@ -563,7 +566,7 @@ func statusStoreWorkCounts(ctx context.Context, rigName string, store beads.Stor
 		}
 	}
 
-	list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true})
+	list, err := statusListStoreWithTimeout(ctx, store, beads.ListQuery{AllowScan: true})
 	var result statusWorkResult
 	if err != nil {
 		result.errs = append(result.errs, fmt.Sprintf("rig %s work: %v", rigName, err))
@@ -614,14 +617,21 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 	return wc, nil
 }
 
-// statusListStoreWithTimeout lists with the per-store read timeout.
-// Store.List takes no context, so on timeout the goroutine is abandoned
-// (it keeps its connection until the scan returns). Counter-capable
-// stores avoid this path entirely; fixing it for the remaining stores
-// requires plumbing context through Store.List.
-func statusListStoreWithTimeout(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+// statusListStoreWithTimeout lists with the per-store read timeout. Stores
+// implementing beads.ContextLister get a real ctx-bound cancellation: on
+// timeout the backing query is canceled and its connection released.
+// Stores without it fall back to the legacy abandon-goroutine pattern
+// (bounded return, but the goroutine keeps its connection until the scan
+// returns) — unchanged behavior for backends that haven't adopted the
+// capability. Counter-capable stores avoid this path entirely.
+func statusListStoreWithTimeout(ctx context.Context, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+	if lister, ok := store.(beads.ContextLister); ok {
+		return lister.ListContext(ctx, query)
 	}
 	type listResult struct {
 		rows []beads.Bead
@@ -635,7 +645,7 @@ func statusListStoreWithTimeout(store beads.Store, query beads.ListQuery) ([]bea
 	select {
 	case result := <-done:
 		return result.rows, result.err
-	case <-time.After(statusStoreReadTimeout):
+	case <-ctx.Done():
 		return nil, fmt.Errorf("list timed out after %s", statusStoreReadTimeout)
 	}
 }

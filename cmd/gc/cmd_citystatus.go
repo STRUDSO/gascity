@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -387,17 +388,27 @@ type statusObservationTarget struct {
 	suspended          bool
 }
 
+// loadStatusSessionSnapshot loads the session snapshot within
+// statusSessionSnapshotTimeout. Stores implementing beads.ContextLister get
+// a real ctx-bound cancellation: on timeout the backing query is canceled
+// and its connection released. Stores without it fall back to the legacy
+// abandon-goroutine pattern (bounded return, but the goroutine keeps its
+// connection until the scan returns) — unchanged behavior for backends that
+// haven't adopted the capability.
 func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
 		return newSessionBeadSnapshot(nil)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
+	defer cancel()
+
 	type snapshotResult struct {
 		snapshot *sessionBeadSnapshot
 		err      error
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		snapshot, err := loadSessionBeadSnapshot(store)
+		snapshot, err := loadSessionBeadSnapshotContext(ctx, store)
 		done <- snapshotResult{snapshot: snapshot, err: err}
 	}()
 
@@ -413,7 +424,7 @@ func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBead
 			return newSessionBeadSnapshot(nil)
 		}
 		return result.snapshot
-	case <-time.After(statusSessionSnapshotTimeout):
+	case <-ctx.Done():
 		if stderr != nil {
 			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
 		}

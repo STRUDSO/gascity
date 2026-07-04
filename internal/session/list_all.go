@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -37,7 +38,24 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	if store == nil {
 		return nil, nil
 	}
+	return listAllSessionBeads(base, store.List)
+}
 
+// ListAllSessionBeadsContext is ListAllSessionBeads but accepts a context so
+// a caller with a deadline (the status endpoints) can cancel the backing
+// queries — via beads.ContextLister when store supports it — instead of
+// leaking a goroutine on timeout. Other callers should keep using
+// ListAllSessionBeads; this exists for the two status call sites only.
+func ListAllSessionBeadsContext(ctx context.Context, store beads.Store, base beads.ListQuery) ([]beads.Bead, error) {
+	if store == nil {
+		return nil, nil
+	}
+	return listAllSessionBeads(base, func(q beads.ListQuery) ([]beads.Bead, error) {
+		return beads.ContextListOrFallback(ctx, store, q)
+	})
+}
+
+func listAllSessionBeads(base beads.ListQuery, list func(beads.ListQuery) ([]beads.Bead, error)) ([]beads.Bead, error) {
 	// Limit is applied globally after the union (see below); passing
 	// base.Limit into each leg independently could return up to 2× the
 	// requested rows or drop the correct top-N when the union spans
@@ -46,7 +64,7 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	byTypeQuery.Type = BeadType
 	byTypeQuery.Label = ""
 	byTypeQuery.Limit = 0
-	byType, typeErr := store.List(byTypeQuery)
+	byType, typeErr := list(byTypeQuery)
 	if typeErr != nil && !beads.IsPartialResult(typeErr) {
 		return nil, fmt.Errorf("listing session beads by type: %w", typeErr)
 	}
@@ -55,7 +73,7 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	byLabelQuery.Type = ""
 	byLabelQuery.Label = LabelSession
 	byLabelQuery.Limit = 0
-	byLabel, labelErr := store.List(byLabelQuery)
+	byLabel, labelErr := list(byLabelQuery)
 	if labelErr != nil && !beads.IsPartialResult(labelErr) {
 		return nil, fmt.Errorf("listing session beads by label: %w", labelErr)
 	}
